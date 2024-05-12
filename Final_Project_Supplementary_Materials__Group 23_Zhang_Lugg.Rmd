@@ -1,0 +1,334 @@
+---
+title: "Final"
+author: "Zhang_Lugg"
+output:
+  pdf_document:
+    number_sections: true
+    df_print: paged
+---
+
+```{r Package_Import,echo=TRUE, results='hide', message=FALSE, warning=FALSE}
+library(r02pro)     #INSTALL IF NECESSARY
+library(tidyverse)  #INSTALL IF NECESSARY
+library(MASS)
+library(naniar)
+library(caret)
+library(glmnet)
+library(plotmo)
+library(pROC)
+library(e1071)
+library(randomForest)
+library(table1)
+rm (list = ls()) # Clearing the memory
+setwd("Y:/NYU/MLPH")
+```
+\newpage
+
+
+```{r DataImport}
+stroke <- read.csv("healthcare-dataset-stroke-data.csv") |>
+  replace_with_na_all(~. %in% c("","N/A")) |>
+  na.omit()
+stroke$bmi <- as.numeric(stroke$bmi)
+
+# Set seed
+set.seed(0923)
+# Set the size if training and test data, here is 1:1
+split_ratio <- 0.5
+# Generate random number and index
+indices <- sample(1:nrow(stroke), size = round(split_ratio * nrow(stroke)), replace = FALSE)
+stroke.training <- stroke[indices, ]
+stroke.test <- stroke[-indices, ]
+str(stroke.training)
+table(stroke.training$stroke)
+str(stroke.test)
+table(stroke.test$stroke)
+```
+
+```{r}
+t <- stroke
+t$gender <- factor(t$gender)
+t$hypertension <- 
+  factor(t$hypertension,
+         levels = c(0,1),
+         labels = c("No","Yes"))
+t$heart_disease <- 
+  factor(t$heart_disease,
+         levels = c(0,1),
+         labels = c("No","Yes"))
+t$work_type <- 
+  factor(t$work_type,
+         levels = c("children","Govt_job","Never_worked",
+                    "Private","Self-employed"),
+         labels = c("Children","Govenment Job","Never Worked",
+                    "Private","Self-employed"))
+t$stroke <- 
+  factor(t$stroke,
+         levels = c(1,0),
+         labels = c("Stroke Patient","Not Stroke"))
+
+
+column_labels <- c("ID","Gender","Age","Hypertension",
+                   "Heart disease","Ever married","Work Type",
+                   "Residence Type","Average Glucose Level",
+                   "BMI(Body Mass Index)","Smoking Status","Stroke")
+
+for (i in seq_along(t)) {
+  attr(t[[i]], "label") <- column_labels[i]
+}
+
+
+pvalue <- function(x, ...) {
+    # Construct vectors of data y, and groups (strata) g
+    y <- unlist(x)
+    g <- factor(rep(1:length(x), times=sapply(x, length)))
+    if (is.numeric(y)) {
+        # For numeric variables, perform a standard 2-sample t-test
+        p <- t.test(y ~ g)$p.value
+    } else {
+        # For categorical variables, perform a chi-squared test of independence
+        p <- wilcox.test(table(y, g))$p.value
+    }
+    # Format the p-value, using an HTML entity for the less-than sign.
+    # The initial empty string places the output on the line below the variable label.
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+table1(~.|stroke,t,
+       extra.col=list(`P-value`=pvalue),
+       overall = F)
+```
+
+
+```{r}
+x <- model.matrix(stroke ~ ., data = stroke.training)[, -1]  # Exclude intercept
+y <- stroke.training$stroke
+
+lasso_model <- glmnet(x,y,alpha = 1)
+plot_glmnet(lasso_model)
+
+lasso_model <- cv.glmnet(x, y, alpha = 1) 
+plot(lasso_model)
+opt_lambda <- lasso_model$lambda.min  # or cv$lambda.1se for the 1 standard error rule
+```
+\newpage
+```{r}
+coef(lasso_model, s = opt_lambda)
+```
+
+```{r LinearRegression}
+
+lm <- lm(stroke~.-id ,stroke.training)
+summary(lm)
+```
+
+```{r logistic, warning=FALSE}
+
+# Define the formula
+formula <- stroke ~ age + heart_disease + avg_glucose_level + hypertension + work_type
+
+#### Logistic
+logi.fit <- glm(formula, data = stroke.training, family='binomial')
+# summary(logi.fit)
+pred_train_prob <- predict(logi.fit,newdata = stroke.test, type = 'response')
+#define object to plot
+rocobj_logi <- roc(stroke.test$stroke, pred_train_prob)
+#create ROC plot
+auc_logi <- auc(rocobj_logi)
+
+#### LDA
+lda.fit <- lda(formula, data = stroke.training)
+lda.pred <- predict(lda.fit,newdata = stroke.test)$posterior[, 2]
+rocobj_lda <- roc(stroke.test$stroke, lda.pred)
+auc_lda <- auc(rocobj_lda)
+
+#### KNN
+knn.fit <- knn3(formula, stroke.training, k = 7, prob = TRUE)
+knn.pred <- predict(knn.fit, newdata = stroke.test, type = "prob")
+rocobj_knn <- roc(stroke.test$stroke, knn.pred[ ,2])
+auc_knn <- auc(rocobj_knn)
+
+#### SVM
+svm.fit <- svm(formula, data = stroke.training, kernel = "radial",probability = TRUE)
+svm.pred <- predict(svm.fit, newdata = stroke.test, probability = TRUE)
+rocobj_svm <- roc(stroke.test$stroke, svm.pred)
+auc_svm <- auc(rocobj_svm)
+
+#### Random Forest
+rf.fit <- randomForest(formula, data = stroke.training)
+rf.pred <- predict(rf.fit, newdata = stroke.test)
+rocobj_rf <- roc(stroke.test$stroke, rf.pred)
+auc_rf <- auc(rocobj_rf)
+
+#### Bagging
+bg.fit <- train(formula, data = stroke.training, method = "treebag")
+bg.pred <- predict(bg.fit, newdata = stroke.test)
+rocobj_bg <- roc(stroke.test$stroke, bg.pred)
+auc_bg <- auc(rocobj_bg)
+#### plot
+rocobjs <- list(Logistic = rocobj_logi, LDA = rocobj_lda,KNN = rocobj_knn, SVM = rocobj_svm, RandomForest = rocobj_rf,Bagging =rocobj_bg)
+methods_auc <- paste(c("Logistic", "LDA","KNN","SVM","Random Forest","Bagging"),
+                     "AUC = ",
+                     round(c(auc_logi, auc_lda, auc_knn,auc_svm,auc_rf,auc_bg),4))
+ggroc(rocobjs, size = 1, alpha = 0.5) +
+scale_color_discrete(labels = methods_auc)
+```
+```{r Accuracy}
+# Predicted probabilities for each model
+logi_pred <- predict(logi.fit, newdata = stroke.training, type = "response")
+lda_pred <- predict(lda.fit, newdata = stroke.training)$posterior[, 2]
+knn_pred <- predict(knn.fit, newdata = stroke.training, type = "prob")
+svm_pred <- predict(svm.fit, newdata = stroke.training, probability = TRUE)
+rf_pred <- predict(rf.fit, newdata = stroke.training)
+bg_pred <- predict(bg.fit, newdata = stroke.training)
+
+# Convert predicted probabilities to class labels
+logi_class <- ifelse(logi_pred > 0.5, 1, 0)  # Logistic Regression
+lda_class <- ifelse(lda_pred > 0.5, 1, 0)    # LDA
+knn_class <- knn_pred[,2]                   # KNN
+svm_class <- ifelse(svm_pred > 0.5, 1, 0)  # SVM
+rf_class <- ifelse(rf_pred > 0.5, 1, 0)                        # Random Forest
+bg_class <- ifelse(bg_pred > 0.5, 1, 0)                       # Bagging
+
+# True class labels
+true_class <- stroke.training$stroke
+
+# Calculate accuracy for each model
+train_error_logi <- mean(logi_class!=true_class)  # Logistic Regression
+train_error_lda <- mean(lda_class!=true_class)    # LDA
+train_error_knn <- mean(knn_class!=true_class)    # KNN
+train_error_svm <- mean(svm_class!=true_class)    # SVM
+train_error_rf <- mean(rf_class!=true_class)      # Random Forest
+train_error_bg <- mean(bg_class!=true_class)      # Bagging
+
+
+
+
+# Predicted probabilities for each model
+logi_pred <- predict(logi.fit, newdata = stroke.test, type = "response")
+lda_pred <- predict(lda.fit, newdata = stroke.test)$posterior[, 2]
+knn_pred <- predict(knn.fit, newdata = stroke.test)
+svm_pred <- predict(svm.fit, newdata = stroke.test, probability = TRUE)
+rf_pred <- predict(rf.fit, newdata = stroke.test)
+bg_pred <- predict(bg.fit, newdata = stroke.test)
+
+# Convert predicted probabilities to class labels
+logi_class <- ifelse(logi_pred > 0.5, 1, 0)  # Logistic Regression
+lda_class <- ifelse(lda_pred > 0.5, 1, 0)    # LDA
+knn_class <- knn_pred[,2]                   # KNN
+svm_class <- ifelse(svm_pred > 0.5, 1, 0)  # SVM
+rf_class <- ifelse(rf_pred > 0.5, 1, 0)                        # Random Forest
+bg_class <- ifelse(bg_pred > 0.5, 1, 0)                       # Bagging
+
+# True class labels
+true_class <- stroke.test$stroke
+
+# Calculate accuracy for each model
+accuracy_logi <- mean(logi_class == true_class)  # Logistic Regression
+test_error_logi <- 1 - accuracy_logi
+accuracy_lda <- mean(lda_class == true_class)    # LDA
+test_error_lda <- 1 - accuracy_lda
+accuracy_knn <- mean(knn_class == true_class)    # KNN
+test_error_knn <- 1 - accuracy_knn
+accuracy_svm <- mean(svm_class == true_class)    # SVM
+test_error_svm <- 1 - accuracy_svm
+accuracy_rf <- mean(rf_class == true_class)      # Random Forest
+test_error_rf <- 1 - accuracy_rf
+accuracy_bg <- mean(bg_class == true_class)      # Bagging
+test_error_bg <- 1 - accuracy_bg
+```
+```{R}
+# Display Results
+cat("Logistic Regression:\n",
+    "Training Error:", train_error_logi, "\n",
+    "Test Error:", test_error_logi, "\n\n")
+
+cat("LDA:\n",
+    "Training Error:", train_error_lda, "\n",
+    "Test Error:", test_error_lda, "\n\n")
+
+cat("KNN:\n",
+    "Training Error:", train_error_knn, "\n",
+    "Test Error:", test_error_knn, "\n\n")
+
+cat("SVM:\n",
+    "Training Error:", train_error_svm, "\n",
+    "Test Error:", test_error_svm, "\n\n")
+
+cat("Random Forest:\n",
+    "Training Error:", train_error_rf, "\n",
+    "Test Error:", test_error_rf, "\n\n")
+
+cat("Bagging:\n",
+    "Training Error:", train_error_bg, "\n",
+    "Test Error:", test_error_bg, "\n")
+```
+
+```{r}
+# Sensitivity (True Positive Rate)
+sensitivity_logi <- sum(logi_class == 1 & true_class == 1) / sum(true_class == 1)
+sensitivity_lda <- sum(lda_class == 1 & true_class == 1) / sum(true_class == 1)
+sensitivity_knn <- sum(knn_class == 1 & true_class == 1) / sum(true_class == 1)
+sensitivity_svm <- sum(svm_class == 1 & true_class == 1) / sum(true_class == 1)
+sensitivity_rf <- sum(rf_class == 1 & true_class == 1) / sum(true_class == 1)
+sensitivity_bg <- sum(bg_class == 1 & true_class == 1) / sum(true_class == 1)
+
+# Specificity (True Negative Rate)
+specificity_logi <- sum(logi_class == 0 & true_class == 0) / sum(true_class == 0)
+specificity_lda <- sum(lda_class == 0 & true_class == 0) / sum(true_class == 0)
+specificity_knn <- sum(knn_class == 0 & true_class == 0) / sum(true_class == 0)
+specificity_svm <- sum(svm_class == 0 & true_class == 0) / sum(true_class == 0)
+specificity_rf <- sum(rf_class == 0 & true_class == 0) / sum(true_class == 0)
+specificity_bg <- sum(bg_class == 0 & true_class == 0) / sum(true_class == 0)
+
+cat("Logistic Regression:\n",
+    "Sensitivity:", sensitivity_logi, "\n",
+    "Specificity:", specificity_logi, "\n\n")
+
+cat("LDA:\n",
+    "Sensitivity:", sensitivity_lda, "\n",
+    "Specificity:", specificity_lda, "\n\n")
+
+cat("KNN:\n",
+    "Sensitivity:", sensitivity_knn, "\n",
+    "Specificity:", specificity_knn, "\n\n")
+
+cat("SVM:\n",
+    "Sensitivity:", sensitivity_svm, "\n",
+    "Specificity:", specificity_svm, "\n\n")
+
+cat("Random Forest:\n",
+    "Sensitivity:", sensitivity_rf, "\n",
+    "Specificity:", specificity_rf, "\n\n")
+
+cat("Bagging:\n",
+    "Sensitivity:", sensitivity_bg, "\n",
+    "Specificity:", specificity_bg, "\n")
+```
+
+
+```{r}
+rbind(
+  c("Logistic Regression",train_error_logi,test_error_logi,accuracy_logi,sensitivity_logi,specificity_logi),
+  c("LDA",train_error_lda,test_error_lda,accuracy_lda,sensitivity_lda,specificity_lda),
+  c("KNN",train_error_knn,test_error_knn,accuracy_knn,sensitivity_knn,specificity_knn),
+  c("SVM",train_error_svm,test_error_svm,accuracy_svm,sensitivity_svm,specificity_svm),
+  c("Random Forest",train_error_rf,test_error_rf,accuracy_rf,sensitivity_rf,specificity_rf),
+  c("Bagging",train_error_bg,test_error_bg,accuracy_bg,sensitivity_bg,specificity_bg)
+) |>
+  data.frame() -> tab
+colnames(tab) <- c("Model","Train Error","Test Error","Accuracy","Sensitivity","Specificity")
+tab |>
+  mutate_at(vars(-Model), as.numeric) %>%
+  mutate_at(vars(-Model), ~ round(., 4)) 
+```
+
+
+```{r}
+
+p <- ncol(stroke.training)-2
+bag <- randomForest(formula, stroke.training, mtry = p, importance=TRUE)
+bag 
+
+importance(bag)
+varImpPlot(bag)
+```
